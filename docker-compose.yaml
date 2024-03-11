@@ -1,0 +1,169 @@
+version: "3"
+
+networks:
+  mlops:
+  docker:
+
+
+volumes:
+  jenkins-data:
+  jenkins-docker-certs:
+  dbdata:
+  minio_data:
+  grafana-data:
+
+services:
+  gitea-server:
+    image: gitea/gitea:1.17.3
+    container_name: gitea-server
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__database__DB_TYPE=postgres
+      - GITEA__database__HOST=gitea-db:5432
+      - GITEA__database__NAME=${GITEA_DB}
+      - GITEA__database__USER=${GITEA_USER}
+      - GITEA__database__PASSWD=${GITEA_PASSWORD}
+    restart: always
+    networks:
+      - mlops
+    volumes:
+      - ./gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      - "222:22"
+    depends_on:
+      - gitea-db
+
+  gitea-db:
+    image: postgres:14
+    restart: always
+    container_name: gitea-db
+    environment:
+      - POSTGRES_USER=${GITEA_USER}
+      - POSTGRES_PASSWORD=${GITEA_PASSWORD}
+      - POSTGRES_DB=${GITEA_DB}
+    networks:
+      - mlops
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+
+  jenkins:
+    build: ./jenkins-image
+    container_name: jenkins
+    restart: always
+    networks:
+      - docker
+      - mlops
+    ports:
+      - 8080:8080
+      - 50000:50000
+    tty: true
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - jenkins-docker-certs:/certs/client:ro
+      - $HOME:/home
+    environment:
+      - DOCKER_HOST=tcp://docker:2376
+      - DOCKER_CERT_PATH=/certs/client
+      - DOCKER_TLS_VERIFY=1
+
+  dind:
+    image: docker:dind
+    container_name: jenkins-dind
+    privileged: true
+    restart: always
+    networks:
+      docker:
+        aliases: 
+          - docker
+    ports:
+      - 2376:2376
+    tty: true
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - jenkins-docker-certs:/certs/client
+      - $HOME:/home
+    environment:
+      - DOCKER_TLS_CERTDIR=/certs
+
+  minio:
+    restart: always
+    image: minio/minio@sha256:d28c69eda85fb4c362d2a8976274da8f369398fc943b0c238c50722fd0c578c4
+    container_name: mlflow_s3
+    networks:
+      - mlops
+    ports:
+        - "9900:9000"
+        - "9901:9001"
+    command: server /data --console-address ':9001' --address ':9000'
+    environment:
+        - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+        - MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY}
+    volumes:
+        - minio_data:/data
+
+  mc:
+    image: minio/mc@sha256:d281c2bfce56c727dc229643f8df99e24295fae586aaf6acb859eb2dd4c66ca4
+    depends_on:
+        - minio
+    container_name: mc
+    networks:
+      - mlops
+    env_file:
+        - .env
+    entrypoint: >
+        /bin/sh -c "
+        /tmp/wait-for-it.sh minio:9900 &&
+        /usr/bin/mc alias set minio http://minio:9900 ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} &&
+        /usr/bin/mc mb minio/mlflow;
+        exit 0;
+        "
+    volumes:
+        - ./wait-for-it.sh:/tmp/wait-for-it.sh
+
+  db:
+    restart: always
+    image: mysql/mysql-server@sha256:fcbe88694872e88ae406bc69540211505eae922a182690d85be6af1a48e5ca0a
+    container_name: mlflow_db
+    networks:
+      - mlops
+    ports:
+        - "3306:3306"
+    environment:
+        - MYSQL_DATABASE=${MYSQL_DATABASE}
+        - MYSQL_USER=${MYSQL_USER}
+        - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+        - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    volumes:
+        - dbdata:/var/lib/mysql
+
+  web:
+    restart: always
+    build: ./mlflow
+    image: mlflow_server
+    container_name: mlflow_server
+    depends_on:
+        - mc
+        - db
+    networks:
+      - mlops
+    ports:
+        - "5000:5000"
+    environment:
+        - MLFLOW_S3_ENDPOINT_URL=http://minio:9900
+        - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+        - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    command: mlflow server --backend-store-uri mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE} --default-artifact-root s3://mlflow/ --host 0.0.0.0
+
+  grafana:
+    image: grafana/grafana:9.3.6
+    ports:
+      - 3030:3000
+    networks:
+      - mlops
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana

@@ -1,0 +1,6 @@
+gitea/
+jenkins-data/
+jenkins-docker-certs/
+postgres/
+venv/
+.env
