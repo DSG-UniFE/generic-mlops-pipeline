@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: yatai-ingress
+  namespace: yatai-system
+
+spec:
+  ingressClassName: public
+  rules:
+  - host: yatai.YOUR_NODE_IP.sslip.io
+    http:
+      paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: yatai
+              port:
+                number: 80
